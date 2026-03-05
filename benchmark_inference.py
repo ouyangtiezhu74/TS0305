@@ -4,7 +4,7 @@ import os
 import pickle
 import time
 from functools import partial
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -111,6 +111,19 @@ def get_model_params(args: argparse.Namespace) -> Dict:
     }
 
 
+def resolve_runtime_shape(args: argparse.Namespace, model_params: Dict) -> Tuple[int, int, int]:
+    """Return (seq_len, height, width) used for random input tensors.
+
+    If checkpoint config is provided, enforce the exact training-time shape to avoid
+    accidental mismatches between CLI values and model weights.
+    """
+    if args.checkpoint_path:
+        h, w = model_params["image_size"]
+        t = model_params["num_frames"]
+        return t, h, w
+    return args.seq_len, args.height, args.width
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="TSformer-VO inference benchmark with fixed objective conditions"
@@ -147,11 +160,16 @@ def main() -> None:
 
     torch.backends.cudnn.benchmark = False
 
+    if args.checkpoint_name and not args.checkpoint_path:
+        raise ValueError("--checkpoint-name requires --checkpoint-path")
+
     model_params = get_model_params(args)
     if not args.checkpoint_path:
         model_params["num_frames"] = args.seq_len
         model_params["image_size"] = (args.height, args.width)
         model_params["num_classes"] = 6 * (args.seq_len - 1)
+
+    seq_len, height, width = resolve_runtime_shape(args, model_params)
 
     model = build_model(model_params, device)
     load_checkpoint(model, args.checkpoint_path, args.checkpoint_name, device)
@@ -159,8 +177,10 @@ def main() -> None:
     print("=" * 72)
     print(f"Device: {device} | AMP: disabled | Warmup: {args.warmup} | Timed iters: {args.measure_iters}")
     print(
-        f"Input shape per step: (N={args.batch_size}, C=3, T={args.seq_len}, H={args.height}, W={args.width})"
+        f"Input shape per step: (N={args.batch_size}, C=3, T={seq_len}, H={height}, W={width})"
     )
+    if args.checkpoint_path:
+        print("Input shape source: loaded from checkpoint args.pkl (overrides CLI --seq-len/--height/--width)")
     if device.type == "cpu":
         print(f"CPU threads: intra-op={torch.get_num_threads()}, inter-op={torch.get_num_interop_threads()}")
     print("Timing scope: tensor -> forward -> tensor(cpu)")
@@ -173,9 +193,9 @@ def main() -> None:
         warmup=args.warmup,
         measure_iters=args.measure_iters,
         batch_size=args.batch_size,
-        seq_len=args.seq_len,
-        height=args.height,
-        width=args.width,
+        seq_len=seq_len,
+        height=height,
+        width=width,
     )
 
     print("[TSformer-VO]")
